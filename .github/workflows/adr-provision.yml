@@ -1,36 +1,45 @@
-name: ADR Provision (label)
+name: ADR Provision + Sync (label)
 
-# Provision Confluence pages for ADRs when a PR is labeled 'sync-to-confluence'
-# (ADR-0007). Provisioning creates the empty page and records concept -> page in
-# the space-property map. It does NOT sync content — the sync pipeline does that
-# on merge. Works whether the PR is open or already merged (labeling a merged PR
-# still fires this event), because no page id is written back to the repo.
+# When a PR is labeled 'sync-to-confluence' (ADR-0007):
+#   1. PROVISION always — create the Confluence page (if absent) and record
+#      concept -> page in the space-property map. Idempotent (self-guards on map).
+#   2. SYNC only if the PR is MERGED — push content from main. Never syncs
+#      unmerged content (open-PR content isn't in main yet). Idempotent
+#      (self-guards on section hashes; unchanged content = no write).
+#
+# Timing cases handled:
+#   - Label open PR  -> provision now; sync happens later on merge (push-sync).
+#   - Label merged PR -> provision + sync together (recovery / late label).
+#   - Re-label       -> re-runs; writes only if content actually changed.
 
 on:
   pull_request:
     types: [labeled]
 
-# Reads repo content to find ADRs; does not push to the repo (no write-back).
 permissions:
   contents: read
-  pull-requests: write     # to comment the result back on the PR
+  pull-requests: write
 
 concurrency:
   group: adr-provision-${{ github.event.pull_request.number }}
   cancel-in-progress: false
 
 jobs:
-  provision:
-    # Only run for our label. GitHub gates label application to write-access
-    # users, so this doubles as authorization.
+  provision-and-sync:
     if: github.event.label.name == 'sync-to-confluence'
     runs-on: ubuntu-latest
+    env:
+      CONFLUENCE_BASE_URL: ${{ vars.CONFLUENCE_BASE_URL }}
+      CONFLUENCE_SPACE_KEY: ${{ vars.CONFLUENCE_SPACE_KEY }}
+      CONFLUENCE_PARENT_ID: ${{ vars.CONFLUENCE_PARENT_ID }}
+      CONFLUENCE_USER: ${{ secrets.CONFLUENCE_USER }}
+      CONFLUENCE_API_TOKEN: ${{ secrets.CONFLUENCE_API_TOKEN }}
     steps:
-      - name: Checkout PR head
+      - name: Checkout PR head (to detect the PR's ADR paths)
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.head.sha }}
-          fetch-depth: 2
+          fetch-depth: 0        # full history: need base, head, and main
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -47,31 +56,42 @@ jobs:
         run: |
           base='${{ github.event.pull_request.base.sha }}'
           head='${{ github.event.pull_request.head.sha }}'
-          # list ADR .md files touched by this PR (cross-boundary only for now)
           paths=$(git diff --name-only "$base" "$head" -- 'cross-boundary/**.md' | tr '\n' ' ')
           echo "paths=$paths" >> "$GITHUB_OUTPUT"
           echo "Changed ADR paths: $paths"
 
-      - name: Provision Confluence pages
+      - name: Provision Confluence pages (always)
         id: provision
+        if: steps.changed.outputs.paths != ''
         working-directory: tooling
-        env:
-          CONFLUENCE_BASE_URL: ${{ vars.CONFLUENCE_BASE_URL }}
-          CONFLUENCE_SPACE_KEY: ${{ vars.CONFLUENCE_SPACE_KEY }}
-          CONFLUENCE_PARENT_ID: ${{ vars.CONFLUENCE_PARENT_ID }}
-          CONFLUENCE_USER: ${{ secrets.CONFLUENCE_USER }}
-          CONFLUENCE_API_TOKEN: ${{ secrets.CONFLUENCE_API_TOKEN }}
         run: |
-          # strip the 'cross-boundary/' paths to bundle-relative (they already are)
-          PATHS="${{ steps.changed.outputs.paths }}"
-          if [ -z "$PATHS" ]; then
-            echo "No ADR paths changed in this PR; nothing to provision."
-            echo "result=nothing" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          OUT=$(python -m adr_sync.provision --bundle-root .. --paths $PATHS)
+          OUT=$(python -m adr_sync.provision --bundle-root .. --paths ${{ steps.changed.outputs.paths }})
           echo "$OUT"
-          # capture for the PR comment
+          {
+            echo "result<<EOFMARK"
+            echo "$OUT"
+            echo "EOFMARK"
+          } >> "$GITHUB_OUTPUT"
+
+      # ---- SYNC: only when the PR is merged (content is in main) ----
+
+      - name: Check out main for sync
+        if: github.event.pull_request.merged == true && steps.changed.outputs.paths != ''
+        run: |
+          git checkout main
+          git pull --ff-only origin main || true
+
+      - name: Sync content to Confluence (merged PRs only)
+        id: sync
+        if: github.event.pull_request.merged == true && steps.changed.outputs.paths != ''
+        working-directory: tooling
+        run: |
+          # Diff main against its previous commit to scope the sync to what merged.
+          # The label may fire well after merge, so fall back to syncing the PR's
+          # specific ADR paths via a targeted range: use the merge base..main.
+          BASE="${{ github.event.pull_request.base.sha }}"
+          OUT=$(python -m adr_sync.sync --bundle-root .. --base-ref "$BASE" --head-ref HEAD)
+          echo "$OUT"
           {
             echo "result<<EOFMARK"
             echo "$OUT"
@@ -79,14 +99,22 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Comment result on PR
-        if: steps.provision.outputs.result != 'nothing'
+        if: steps.changed.outputs.paths != ''
         uses: actions/github-script@v7
         with:
           script: |
-            const out = `${{ steps.provision.outputs.result }}`;
+            const provision = `${{ steps.provision.outputs.result }}` || '(none)';
+            const merged = ${{ github.event.pull_request.merged }};
+            const sync = `${{ steps.sync.outputs.result }}` || '';
+            let body = "✅ **Confluence provisioning complete**\n\n```\n" + provision + "\n```\n";
+            if (merged) {
+              body += "\n**Sync (merged PR):**\n```\n" + (sync || '(no sync output)') + "\n```";
+            } else {
+              body += "\nPR is still open — page provisioned; content will sync on merge.";
+            }
             await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.issue.number,
-              body: "✅ **Confluence provisioning complete**\n\n```\n" + out + "\n```\nPages will be filled on the next sync (merge to main)."
+              body
             });
