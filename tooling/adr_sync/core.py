@@ -37,14 +37,39 @@ _SECTION_RE = re.compile(r"^##[ \t]+(.+?)[ \t]*$", re.MULTILINE)
 # ---------------------------------------------------------------------------
 
 
+# Git's canonical empty tree object. Diffing against it lists every tracked
+# file as added — the correct behavior for a first run / initial commit, where
+# there is no prior commit to compare against.
+_EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+
+
+def _resolve_base(bundle_root: Path, base_ref: str) -> str:
+    """Return a usable diff base, falling back to the empty tree.
+
+    A fresh repo (single commit) has no HEAD~1, and workflow_dispatch runs don't
+    populate github.event.before. In those cases base_ref is missing or invalid;
+    rather than crash (git exit 128), diff against the empty tree so a first run
+    treats all tracked files as changed.
+    """
+    if not base_ref:
+        return _EMPTY_TREE
+    ok = subprocess.run(
+        ["git", "-C", str(bundle_root), "rev-parse", "--verify", "--quiet", f"{base_ref}^{{commit}}"],
+        capture_output=True, text=True,
+    )
+    return base_ref if ok.returncode == 0 else _EMPTY_TREE
+
+
 def changed_markdown_paths(bundle_root: Path, base_ref: str, head_ref: str = "HEAD") -> list[Path]:
     """Return changed .md paths between two git refs (ADR-0003: git diff).
 
     No timestamp gate — change detection depends only on git and, later, content
-    hashing (ADR-0003 decision #3).
+    hashing (ADR-0003 decision #3). The base is resolved defensively so a fresh
+    repo or a manual run does not error out.
     """
+    base = _resolve_base(bundle_root, base_ref)
     out = subprocess.run(
-        ["git", "-C", str(bundle_root), "diff", "--name-only", f"{base_ref}", f"{head_ref}"],
+        ["git", "-C", str(bundle_root), "diff", "--name-only", base, head_ref],
         capture_output=True, text=True, check=True,
     ).stdout
     paths = []
