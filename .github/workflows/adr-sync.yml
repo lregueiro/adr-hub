@@ -1,0 +1,73 @@
+name: ADR Sync
+
+# One-way sync of OKF-conformant ADRs to destination plugins (ADR-0003, 0004).
+# Phase-1 POC: the pipeline lives in tooling/ within this repo (ADR-0005).
+# The pipeline is a CONSUMER: it never writes back to the repo. Telemetry lives
+# only in this workflow's run logs (ADR-0003 #6).
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'cross-boundary/**.md'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Run without writing to destinations'
+        type: boolean
+        default: true
+
+permissions:
+  contents: read          # no write — the pipeline must not push to the repo
+
+concurrency:
+  group: adr-sync-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (with history for git diff)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r tooling/requirements.txt
+          sudo apt-get update && sudo apt-get install -y pandoc
+
+      - name: Determine diff base
+        id: base
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            echo "base_ref=${{ github.event.before }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "base_ref=HEAD~1" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run sync
+        working-directory: tooling
+        env:
+          CONFLUENCE_BASE_URL: ${{ vars.CONFLUENCE_BASE_URL }}
+          CONFLUENCE_SPACE_KEY: ${{ vars.CONFLUENCE_SPACE_KEY }}
+          CONFLUENCE_USER: ${{ secrets.CONFLUENCE_USER }}
+          CONFLUENCE_API_TOKEN: ${{ secrets.CONFLUENCE_API_TOKEN }}
+        run: |
+          DRY_FLAG="--dry-run"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.dry_run }}" = "false" ]; then
+            DRY_FLAG=""
+          fi
+          # bundle root is the repo root (one level up from tooling/)
+          python -m adr_sync.sync \
+            --bundle-root .. \
+            --base-ref "${{ steps.base.outputs.base_ref }}" \
+            --head-ref HEAD \
+            $DRY_FLAG

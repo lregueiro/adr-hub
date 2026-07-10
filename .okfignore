@@ -1,0 +1,6 @@
+# Paths outside the OKF knowledge bundle. Consumers/agents traversing the
+# bundle should skip these. (Phase-1 only; removed on Phase-2 extraction.)
+tooling/
+.github/
+.gitignore
+.okfignore
