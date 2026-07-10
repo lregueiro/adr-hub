@@ -134,10 +134,22 @@ class DestinationPlugin(ABC):
     def is_publishable(self, adr: AdrIR) -> bool:
         """Per-destination draft gate.
 
-        Confluence: True once confluence_page_id is set. Static site: may be
-        always True. An ADR can be publishable to one destination and withheld
-        from another. This gate lives in the plugin, NOT in core detection.
+        Confluence: True once the concept is in the destination's mapping. Static
+        site: may be always True. An ADR can be publishable to one destination and
+        withheld from another. This gate lives in the plugin, NOT in core detection.
         """
+
+    def provision(self, adr: AdrIR) -> str | None:
+        """Ensure a destination target exists for this ADR; return its id/handle.
+
+        Called by the provisioning entrypoint (ADR-0007), typically triggered by
+        a label. Idempotent: returns the existing target if already provisioned.
+        Default is a no-op returning None, for destinations that need no explicit
+        provisioning step (e.g. a static site that derives its path from the
+        concept id). Confluence overrides this to create a page and record the
+        concept -> page mapping.
+        """
+        return None
 
     @abstractmethod
     def render(self, adr: AdrIR) -> RenderedArtifact:

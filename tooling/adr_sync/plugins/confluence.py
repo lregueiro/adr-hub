@@ -75,16 +75,18 @@ class ConfluencePlugin(DestinationPlugin):
         """
         return adr.concept_id in self._concept_map()
 
-    def provision(self, adr: AdrIR, parent_id: str | None = None) -> str:
+    def provision(self, adr: AdrIR) -> str:
         """Ensure a Confluence page exists for this ADR; return its page id.
 
         Called by the label-triggered provisioning workflow (ADR-0007). Idempotent:
         if the concept is already mapped, returns the existing id; otherwise
         creates an empty page and records concept_id -> page_id in the map.
+        Parent page (optional) comes from CONFLUENCE_PARENT_ID.
         """
         existing = self._concept_map().get(adr.concept_id)
         if existing:
             return existing
+        parent_id = os.environ.get("CONFLUENCE_PARENT_ID") or None
         title = adr.frontmatter.get("title") or adr.concept_id
         page_id = self._create_page(title, "<p>Provisioned — pending first sync.</p>", parent_id)
         self._map_set(adr.concept_id, page_id)
@@ -327,6 +329,12 @@ class ConfluencePlugin(DestinationPlugin):
 
     def _concept_map(self) -> dict:
         if self._map_cache is not None:
+            return self._map_cache
+        # No live lookup when unconfigured (e.g. dry-run without credentials):
+        # treat the map as empty so change detection proceeds without a network
+        # call. A real run has these set and fetches the true map.
+        if not (self.base_url and self.space_key and self.user and self.token):
+            self._map_cache = {}
             return self._map_cache
         url = self._api(f"space/{self.space_key}/property/{self._MAP_KEY}")
         req = urllib.request.Request(url, headers={

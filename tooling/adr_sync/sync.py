@@ -18,13 +18,8 @@ import sys
 from pathlib import Path
 
 from . import core
-from .ir import DestinationPlugin, SyncResult
-from .plugins.confluence import ConfluencePlugin
-
-
-def build_plugins(dry_run: bool) -> list[DestinationPlugin]:
-    # Register destinations here. Adding one is a plugin, not a core change.
-    return [ConfluencePlugin(dry_run=dry_run)]
+from .ir import SyncResult
+from .registry import build_plugins
 
 
 def run(bundle_root: Path, base_ref: str, head_ref: str, dry_run: bool) -> list[SyncResult]:

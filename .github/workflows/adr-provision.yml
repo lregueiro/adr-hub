@@ -1,0 +1,92 @@
+name: ADR Provision (label)
+
+# Provision Confluence pages for ADRs when a PR is labeled 'sync-to-confluence'
+# (ADR-0007). Provisioning creates the empty page and records concept -> page in
+# the space-property map. It does NOT sync content — the sync pipeline does that
+# on merge. Works whether the PR is open or already merged (labeling a merged PR
+# still fires this event), because no page id is written back to the repo.
+
+on:
+  pull_request:
+    types: [labeled]
+
+# Reads repo content to find ADRs; does not push to the repo (no write-back).
+permissions:
+  contents: read
+  pull-requests: write     # to comment the result back on the PR
+
+concurrency:
+  group: adr-provision-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  provision:
+    # Only run for our label. GitHub gates label application to write-access
+    # users, so this doubles as authorization.
+    if: github.event.label.name == 'sync-to-confluence'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PR head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 2
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r tooling/requirements.txt
+
+      - name: Determine changed ADR paths in this PR
+        id: changed
+        run: |
+          base='${{ github.event.pull_request.base.sha }}'
+          head='${{ github.event.pull_request.head.sha }}'
+          # list ADR .md files touched by this PR (cross-boundary only for now)
+          paths=$(git diff --name-only "$base" "$head" -- 'cross-boundary/**.md' | tr '\n' ' ')
+          echo "paths=$paths" >> "$GITHUB_OUTPUT"
+          echo "Changed ADR paths: $paths"
+
+      - name: Provision Confluence pages
+        id: provision
+        working-directory: tooling
+        env:
+          CONFLUENCE_BASE_URL: ${{ vars.CONFLUENCE_BASE_URL }}
+          CONFLUENCE_SPACE_KEY: ${{ vars.CONFLUENCE_SPACE_KEY }}
+          CONFLUENCE_PARENT_ID: ${{ vars.CONFLUENCE_PARENT_ID }}
+          CONFLUENCE_USER: ${{ secrets.CONFLUENCE_USER }}
+          CONFLUENCE_API_TOKEN: ${{ secrets.CONFLUENCE_API_TOKEN }}
+        run: |
+          # strip the 'cross-boundary/' paths to bundle-relative (they already are)
+          PATHS="${{ steps.changed.outputs.paths }}"
+          if [ -z "$PATHS" ]; then
+            echo "No ADR paths changed in this PR; nothing to provision."
+            echo "result=nothing" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          OUT=$(python -m adr_sync.provision --bundle-root .. --paths $PATHS)
+          echo "$OUT"
+          # capture for the PR comment
+          {
+            echo "result<<EOFMARK"
+            echo "$OUT"
+            echo "EOFMARK"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Comment result on PR
+        if: steps.provision.outputs.result != 'nothing'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const out = `${{ steps.provision.outputs.result }}`;
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: "✅ **Confluence provisioning complete**\n\n```\n" + out + "\n```\nPages will be filled on the next sync (merge to main)."
+            });
