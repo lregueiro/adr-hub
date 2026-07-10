@@ -184,6 +184,10 @@ class ConfluencePlugin(DestinationPlugin):
         # unchanged-only sync never reaches this write at all (skipped above).
         self._put_page(target_id, page["title"], rendered.content["body"], version + 1)
         self._put_hashes(target_id, incoming)
+        # Enforce one-way sync: lock EDITING to the service account so stakeholders
+        # can't alter the mirror body (which the next sync would silently
+        # overwrite). Read stays open, so viewers can still see and COMMENT.
+        self._restrict_edit_to_self(target_id)
         detail = "first publish" if not stored else f"sections={changed}"
         return SyncResult(self.name(), target_id, "updated", detail)
 
@@ -209,6 +213,46 @@ class ConfluencePlugin(DestinationPlugin):
                 lines.append("</ul></li>")
 
     # -- REST helpers ---------------------------------------------------------
+
+    # -- edit restrictions: enforce one-way sync ------------------------------
+    # Lock the 'update' (edit) operation to the service account only. Crucially
+    # we do NOT restrict 'read' — read access governs commenting, so leaving it
+    # open keeps the page viewable and commentable by everyone while making the
+    # body service-account-write-only.
+
+    _self_account_id: str | None = None
+
+    def _current_account_id(self) -> str:
+        if self._self_account_id:
+            return self._self_account_id
+        url = self._api("user/current")
+        req = urllib.request.Request(url, headers={
+            "Authorization": self._auth_header(),
+            "Accept": "application/json",
+        })
+        with urllib.request.urlopen(req) as resp:
+            self._self_account_id = json.loads(resp.read().decode())["accountId"]
+        return self._self_account_id
+
+    def _restrict_edit_to_self(self, page_id: str) -> None:
+        account_id = self._current_account_id()
+        url = self._api(f"content/{page_id}/restriction")
+        # operation 'update' == edit. Only the service account may edit; read is
+        # left unrestricted so all viewers retain view + comment access.
+        payload = [{
+            "operation": "update",
+            "restrictions": {"user": [{"type": "known", "accountId": account_id}]},
+        }]
+        req = urllib.request.Request(
+            url, data=json.dumps(payload).encode(), method="PUT",
+            headers={
+                "Authorization": self._auth_header(),
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
+        )
+        with urllib.request.urlopen(req) as resp:
+            resp.read()
 
     def _auth_header(self) -> str:
         raw = f"{self.user}:{self.token}".encode()
