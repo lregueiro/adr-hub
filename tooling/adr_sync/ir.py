@@ -121,6 +121,17 @@ class DestinationPlugin(ABC):
     def name(self) -> str:
         """Stable identifier for logs/telemetry, e.g. 'confluence'."""
 
+    def is_enabled(self) -> bool:
+        """Level-2 global on/off for this destination.
+
+        Whether this destination is active at all, independent of any per-run
+        selection. Default True. A plugin overrides this to read its own config
+        (e.g. an env var), so a destination can be globally disabled during
+        staged rollout. Level 2 has priority over the per-run --destinations
+        filter: a disabled destination never runs, even if explicitly selected.
+        """
+        return True
+
     @abstractmethod
     def target_id(self, adr: AdrIR) -> str | None:
         """Resolve the destination address from frontmatter.

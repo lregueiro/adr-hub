@@ -107,11 +107,20 @@ jobs:
             const provision = `${{ steps.provision.outputs.result }}` || '(none)';
             const merged = ${{ github.event.pull_request.merged }};
             const sync = `${{ steps.sync.outputs.result }}` || '';
-            let body = "✅ **Confluence provisioning complete**\n\n```\n" + provision + "\n```\n";
-            if (merged) {
-              body += "\n**Sync (merged PR):**\n```\n" + (sync || '(no sync output)') + "\n```";
+            const disabled = provision.includes('globally disabled') || sync.includes('globally disabled');
+
+            let body;
+            if (disabled) {
+              body = "⚠️ **Confluence is currently disabled** (`CONFLUENCE_ENABLED=false`).\n"
+                   + "The page was **not** provisioned or synced. Re-apply the label after enabling.\n\n"
+                   + "```\n" + provision + (sync ? "\n" + sync : "") + "\n```";
             } else {
-              body += "\nPR is still open — page provisioned; content will sync on merge.";
+              body = "✅ **Confluence provisioning complete**\n\n```\n" + provision + "\n```\n";
+              if (merged) {
+                body += "\n**Sync (merged PR):**\n```\n" + (sync || '(no sync output)') + "\n```";
+              } else {
+                body += "\nPR is still open — page provisioned; content will sync on merge.";
+              }
             }
             await github.rest.issues.createComment({
               owner: context.repo.owner,

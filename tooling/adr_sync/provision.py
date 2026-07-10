@@ -18,7 +18,22 @@ import sys
 from pathlib import Path
 
 from . import core
-from .registry import build_plugins
+from .registry import build_plugins, resolve_destinations
+
+
+def _skip_lines(only) -> list[str]:
+    """Explain any requested/registered destination that will NOT run."""
+    _, skipped = resolve_destinations(only)
+    reasons = {
+        "disabled": "skipped — globally disabled",
+        "unknown": "skipped — not a registered destination",
+        "unselected": "skipped — not selected for this run",
+    }
+    # Only surface 'disabled' and 'unknown' as noteworthy; 'unselected' is
+    # normal when a selection was given.
+    return [f"[{name}] {reasons[reason]}"
+            for name, reason in sorted(skipped.items())
+            if reason in ("disabled", "unknown")]
 
 
 def _adrs_for_paths(bundle_root: Path, paths: list[str]) -> list:
@@ -46,14 +61,21 @@ def _all_adrs(bundle_root: Path) -> list:
     return out
 
 
-def run(bundle_root: Path, paths: list[str], provision_all: bool, dry_run: bool) -> list[str]:
+def run(bundle_root: Path, paths: list[str], provision_all: bool, dry_run: bool,
+        only: set[str] | None = None) -> list[str]:
     adrs = _all_adrs(bundle_root) if provision_all else _adrs_for_paths(bundle_root, paths)
     lines: list[str] = []
+    # Explain any requested destination that will not run (disabled/unknown).
+    lines.extend(_skip_lines(only))
     if not adrs:
         lines.append("No ADRs to provision.")
         return lines
 
-    for plugin in build_plugins(dry_run):
+    plugins = build_plugins(dry_run, only=only)
+    if not plugins and not any("skipped" in l for l in lines):
+        lines.append("No active destinations for this run.")
+
+    for plugin in plugins:
         pname = plugin.name()
         for adr in adrs:
             if dry_run:
@@ -73,9 +95,14 @@ def main() -> int:
     ap.add_argument("--paths", nargs="*", default=[], help="specific ADR paths (bundle-relative)")
     ap.add_argument("--all", action="store_true", help="provision every ADR in the bundle")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--destinations", default="",
+                    help="comma-separated destinations to run (level 1). "
+                         "Empty => all enabled. Globally-disabled destinations "
+                         "(level 2) never run regardless.")
     args = ap.parse_args()
 
-    lines = run(args.bundle_root, args.paths, args.all, args.dry_run)
+    only = {d.strip() for d in args.destinations.split(",") if d.strip()} or None
+    lines = run(args.bundle_root, args.paths, args.all, args.dry_run, only=only)
     print("=== PROVISIONING (ADR-0007) ===")
     for line in lines:
         print(line)

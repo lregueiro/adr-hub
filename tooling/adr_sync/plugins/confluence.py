@@ -58,6 +58,10 @@ class ConfluencePlugin(DestinationPlugin):
     def name(self) -> str:
         return "confluence"
 
+    def is_enabled(self) -> bool:
+        # Level-2 global toggle. Disabled if CONFLUENCE_ENABLED is 'false'.
+        return os.environ.get("CONFLUENCE_ENABLED", "true").strip().lower() != "false"
+
     def target_id(self, adr: AdrIR) -> str | None:
         """Resolve the page id from the space-property concept map (ADR-0007).
 
