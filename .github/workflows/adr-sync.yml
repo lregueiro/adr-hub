@@ -61,6 +61,7 @@ jobs:
           fi
 
       - name: Run sync
+        working-directory: tooling
         env:
           CONFLUENCE_BASE_URL: ${{ vars.CONFLUENCE_BASE_URL }}
           CONFLUENCE_SPACE_KEY: ${{ vars.CONFLUENCE_SPACE_KEY }}
@@ -76,8 +77,9 @@ jobs:
             DRY_FLAG=""
           fi
 
+          # bundle root is the repo root (one level up from tooling/)
           python -m adr_sync.sync \
-            --bundle-root . \
+            --bundle-root .. \
             --base-ref "${{ steps.base.outputs.base_ref }}" \
             --head-ref HEAD \
             $DRY_FLAG
