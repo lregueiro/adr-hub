@@ -71,7 +71,7 @@ Sources indexed by Copilot Space:
 
 ## Next Steps
 
-1. Create the \`core-platform-adr-hub\` repository with branch protection, CODEOWNERS, and an initial README defining scope and contribution process.
+1. Create the \`l0002-adr-hub\` repository with branch protection, CODEOWNERS, and an initial README defining scope and contribution process.
 2. Add \`core-platform-adr-hub\` as a source in the Copilot Space (replacing any uploaded documents from ADR-0001 prototyping).
 3. Pilot the GitHub Actions sync pipeline against \`core-platform-adr-hub\` — see [ADR-CorePlatform-0003](/cross-boundary/ADR-CorePlatform-0003.md).
 4. Define the process for onboarding new ABC Inc repositories into the Copilot Space source list.
