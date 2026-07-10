@@ -70,3 +70,4 @@ Adopt the following three-layer model for ABC Inc architectural decisions:
 [3] [Tech Strategy Confluence ADR space](https://cawiki.atlassian.net/wiki/spaces/DSP/folder/5397283275)
 [4] [ADR-CorePlatform-0002 — Hub Repo and Spaces Aggregation Model](/cross-boundary/ADR-CorePlatform-0002.md)
 [5] [ADR-CorePlatform-0003 — Confluence Sync Pipeline](/cross-boundary/ADR-CorePlatform-0003.md)
+
