@@ -59,11 +59,37 @@ class ConfluencePlugin(DestinationPlugin):
         return "confluence"
 
     def target_id(self, adr: AdrIR) -> str | None:
-        page_id = adr.frontmatter.get("confluence_page_id")
-        return str(page_id) if page_id else None
+        """Resolve the page id from the space-property concept map (ADR-0007).
+
+        No longer reads confluence_page_id from frontmatter — the bundle carries
+        no destination-specific IDs. The map is the address book.
+        """
+        return self._concept_map().get(adr.concept_id)
 
     def is_publishable(self, adr: AdrIR) -> bool:
-        return self.target_id(adr) is not None
+        """Publishable == present in the concept map (ADR-0007).
+
+        Presence means the ADR has been provisioned (a page exists), which is the
+        act the `sync-to-confluence` label performs. An ADR not in the map has
+        not been labeled/provisioned and is withheld.
+        """
+        return adr.concept_id in self._concept_map()
+
+    def provision(self, adr: AdrIR, parent_id: str | None = None) -> str:
+        """Ensure a Confluence page exists for this ADR; return its page id.
+
+        Called by the label-triggered provisioning workflow (ADR-0007). Idempotent:
+        if the concept is already mapped, returns the existing id; otherwise
+        creates an empty page and records concept_id -> page_id in the map.
+        """
+        existing = self._concept_map().get(adr.concept_id)
+        if existing:
+            return existing
+        title = adr.frontmatter.get("title") or adr.concept_id
+        page_id = self._create_page(title, "<p>Provisioned — pending first sync.</p>", parent_id)
+        self._map_set(adr.concept_id, page_id)
+        return page_id
+
 
     # -- render ---------------------------------------------------------------
 
@@ -289,6 +315,91 @@ class ConfluencePlugin(DestinationPlugin):
         )
         with urllib.request.urlopen(req) as resp:
             return json.loads(resp.read().decode())
+
+    # -- concept -> page mapping (space property) -----------------------------
+    # The address book AND publication gate (ADR-0007). Lives in a SPACE property
+    # (not a page property) so it has a stable, well-known location independent
+    # of any ADR page — avoiding the chicken-and-egg of storing a page's address
+    # on the page itself. Cached per run to avoid refetching on every ADR.
+
+    _MAP_KEY = "okf_concept_page_map"
+    _map_cache: dict | None = None
+
+    def _concept_map(self) -> dict:
+        if self._map_cache is not None:
+            return self._map_cache
+        url = self._api(f"space/{self.space_key}/property/{self._MAP_KEY}")
+        req = urllib.request.Request(url, headers={
+            "Authorization": self._auth_header(), "Accept": "application/json",
+        })
+        try:
+            with urllib.request.urlopen(req) as resp:
+                self._map_cache = json.loads(resp.read().decode()).get("value", {}) or {}
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                self._map_cache = {}  # not created yet
+            else:
+                raise
+        return self._map_cache
+
+    def _map_set(self, concept_id: str, page_id: str) -> None:
+        current = dict(self._concept_map())
+        current[concept_id] = page_id
+        # fetch current version (if any) to increment / decide create vs update
+        get_url = self._api(f"space/{self.space_key}/property/{self._MAP_KEY}")
+        version = 0
+        try:
+            req = urllib.request.Request(get_url, headers={
+                "Authorization": self._auth_header(), "Accept": "application/json",
+            })
+            with urllib.request.urlopen(req) as resp:
+                version = json.loads(resp.read().decode())["version"]["number"]
+        except urllib.error.HTTPError as e:
+            if e.code != 404:
+                raise
+
+        if version:
+            payload = {"key": self._MAP_KEY, "value": current, "version": {"number": version + 1}}
+            req = urllib.request.Request(
+                get_url, data=json.dumps(payload).encode(), method="PUT",
+                headers={
+                    "Authorization": self._auth_header(),
+                    "Content-Type": "application/json", "Accept": "application/json",
+                },
+            )
+        else:
+            create_url = self._api(f"space/{self.space_key}/property")
+            payload = {"key": self._MAP_KEY, "value": current}
+            req = urllib.request.Request(
+                create_url, data=json.dumps(payload).encode(), method="POST",
+                headers={
+                    "Authorization": self._auth_header(),
+                    "Content-Type": "application/json", "Accept": "application/json",
+                },
+            )
+        with urllib.request.urlopen(req) as resp:
+            resp.read()
+        self._map_cache = current  # keep cache in sync
+
+    def _create_page(self, title: str, body: str, parent_id: str | None = None) -> str:
+        url = self._api("content")
+        payload = {
+            "type": "page",
+            "title": title,
+            "space": {"key": self.space_key},
+            "body": {"storage": {"value": body, "representation": "storage"}},
+        }
+        if parent_id:
+            payload["ancestors"] = [{"id": parent_id}]
+        req = urllib.request.Request(
+            url, data=json.dumps(payload).encode(), method="POST",
+            headers={
+                "Authorization": self._auth_header(),
+                "Content-Type": "application/json", "Accept": "application/json",
+            },
+        )
+        with urllib.request.urlopen(req) as resp:
+            return json.loads(resp.read().decode())["id"]
 
     # -- content properties: per-section source hashes ------------------------
     # Stored as a page property (key: okf_section_hashes). Invisible on the page
