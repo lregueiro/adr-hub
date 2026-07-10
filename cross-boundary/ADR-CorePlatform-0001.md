@@ -15,7 +15,7 @@ authors:
 supersedes: ~
 superseded_by: ~
 amended_by: ADR-CorePlatform-0002
-confluence_page_id: ~
+confluence_page_id: 720897
 ---
 
 ## Context
