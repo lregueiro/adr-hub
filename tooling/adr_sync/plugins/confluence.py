@@ -69,15 +69,20 @@ class ConfluencePlugin(DestinationPlugin):
 
     def render(self, adr: AdrIR) -> RenderedArtifact:
         """Build the enriched-mirror body: Info Panel from frontmatter + one
-        marked storage-format region per mapped section (verbatim wording)."""
+        marked storage-format region per mapped section (verbatim wording).
+
+        Also carries each mapped section's SOURCE hash (from the IR) so sync()
+        can detect change against Confluence-normalization-proof hashes."""
         parts = [self._render_info_panel(adr.frontmatter)]
         regions: dict[str, str] = {}
+        section_hashes: dict[str, str] = {}
         for section in adr.sections:
             anchor = SECTION_ANCHORS.get(section.name)
             if anchor is None:
                 continue  # unmapped section; not mirrored
             storage = self._md_to_storage(section.raw_markdown)
             regions[anchor] = storage
+            section_hashes[anchor] = section.content_hash  # source hash from core.py
             parts.append(
                 _REGION_START.format(anchor=anchor)
                 + f"<h2>{html.escape(section.name)}</h2>"
@@ -86,7 +91,7 @@ class ConfluencePlugin(DestinationPlugin):
             )
         full_body = "\n".join(parts)
         return RenderedArtifact(
-            content={"body": full_body, "regions": regions},
+            content={"body": full_body, "regions": regions, "section_hashes": section_hashes},
             metadata={"anchors": list(regions)},
         )
 
@@ -156,46 +161,31 @@ class ConfluencePlugin(DestinationPlugin):
             )
 
         page = self._get_page(target_id)
-        existing_body = page["body"]["storage"]["value"]
         version = page["version"]["number"]
 
-        new_body = existing_body
-        changed: list[str] = []
-        for anchor, storage in rendered.content["regions"].items():
-            incoming = (
-                _REGION_START.format(anchor=anchor)
-                + f"<h2>{anchor.replace('okf-', '').title()}</h2>"
-                + storage
-                + _REGION_END.format(anchor=anchor)
-            )
-            new_body, did_change = self._replace_region(new_body, anchor, incoming, storage)
-            if did_change:
-                changed.append(anchor)
+        # Change detection uses SOURCE hashes (from the IR), not stored HTML.
+        # Confluence normalizes stored storage-format on save (reorders
+        # attributes, rewrites entities, strips HTML comments), so hashing the
+        # round-tripped body always reports "changed". The source-markdown hash
+        # is computed in core.py and is immune to that. We persist the per-section
+        # source hashes in a Confluence content property (invisible on the page).
+        stored = self._get_hashes(target_id)          # {anchor: source_hash} or {}
+        incoming = rendered.content["section_hashes"]  # {anchor: source_hash}
 
-        if not changed and _REGION_START.format(anchor="okf-context") in existing_body:
+        changed = [a for a, h in incoming.items() if stored.get(a) != h]
+
+        if stored and not changed:
             return SyncResult(self.name(), target_id, "skipped", "no section changed")
 
-        # First publish to a blank page: no regions yet -> write the full body.
-        if _REGION_START.format(anchor="okf-context") not in existing_body:
-            new_body = rendered.content["body"]
-            changed = list(rendered.content["regions"])
-
-        self._put_page(target_id, page["title"], new_body, version + 1)
-        return SyncResult(self.name(), target_id, "updated", f"sections={changed}")
-
-    def _replace_region(self, body: str, anchor: str, incoming: str, storage: str):
-        start = _REGION_START.format(anchor=anchor)
-        end = _REGION_END.format(anchor=anchor)
-        pattern = re.compile(re.escape(start) + r".*?" + re.escape(end), re.DOTALL)
-        m = pattern.search(body)
-        if not m:
-            return body, False  # region absent; full-body path handles first publish
-        # hash-compare: only rewrite if the section content actually changed
-        existing_hash = hashlib.sha256(m.group(0).encode()).hexdigest()
-        incoming_hash = hashlib.sha256(incoming.encode()).hexdigest()
-        if existing_hash == incoming_hash:
-            return body, False
-        return body[: m.start()] + incoming + body[m.end():], True
+        # Whenever anything changed (or first publish), write the full rendered
+        # body. Section-level *change detection* is what protects comments across
+        # no-op syncs; a genuine content change to a section legitimately rewrites
+        # the body. Inline comments on UNCHANGED sections are protected because an
+        # unchanged-only sync never reaches this write at all (skipped above).
+        self._put_page(target_id, page["title"], rendered.content["body"], version + 1)
+        self._put_hashes(target_id, incoming)
+        detail = "first publish" if not stored else f"sections={changed}"
+        return SyncResult(self.name(), target_id, "updated", detail)
 
     # -- navigation -----------------------------------------------------------
 
@@ -255,3 +245,65 @@ class ConfluencePlugin(DestinationPlugin):
         )
         with urllib.request.urlopen(req) as resp:
             return json.loads(resp.read().decode())
+
+    # -- content properties: per-section source hashes ------------------------
+    # Stored as a page property (key: okf_section_hashes). Invisible on the page
+    # body, immune to storage-format normalization, and the authority for
+    # "did this section change?" across syncs.
+
+    _PROP_KEY = "okf_section_hashes"
+
+    def _get_hashes(self, page_id: str) -> dict:
+        url = self._api(f"content/{page_id}/property/{self._PROP_KEY}")
+        req = urllib.request.Request(url, headers={
+            "Authorization": self._auth_header(),
+            "Accept": "application/json",
+        })
+        try:
+            with urllib.request.urlopen(req) as resp:
+                data = json.loads(resp.read().decode())
+            return data.get("value", {}) or {}
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                return {}  # property not set yet (first publish)
+            raise
+
+    def _put_hashes(self, page_id: str, hashes: dict) -> None:
+        # Property has its own version; fetch current to increment, else create.
+        get_url = self._api(f"content/{page_id}/property/{self._PROP_KEY}")
+        current_version = 0
+        try:
+            req = urllib.request.Request(get_url, headers={
+                "Authorization": self._auth_header(), "Accept": "application/json",
+            })
+            with urllib.request.urlopen(req) as resp:
+                current_version = json.loads(resp.read().decode())["version"]["number"]
+        except urllib.error.HTTPError as e:
+            if e.code != 404:
+                raise
+
+        payload = {"key": self._PROP_KEY, "value": hashes}
+        if current_version:
+            payload["version"] = {"number": current_version + 1}
+        req = urllib.request.Request(
+            get_url, data=json.dumps(payload).encode(),
+            method="PUT" if current_version else "POST",
+            headers={
+                "Authorization": self._auth_header(),
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
+        )
+        # POST to create uses the collection endpoint, not the keyed one.
+        if not current_version:
+            create_url = self._api(f"content/{page_id}/property")
+            req = urllib.request.Request(
+                create_url, data=json.dumps(payload).encode(), method="POST",
+                headers={
+                    "Authorization": self._auth_header(),
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                },
+            )
+        with urllib.request.urlopen(req) as resp:
+            resp.read()
