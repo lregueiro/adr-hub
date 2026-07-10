@@ -59,7 +59,7 @@ Adopt the following three-layer model for ABC Inc architectural decisions:
 
 ## Next Steps
 
-1. Create the \`core-platform-adr-hub\` repository — see [ADR-CorePlatform-0002](/cross-boundary/ADR-CorePlatform-0002.md).
+1. Create the \`adr-hub\` repository — see [ADR-CorePlatform-0002](/cross-boundary/ADR-CorePlatform-0002.md).
 2. Design and pilot the Confluence sync pipeline — see [ADR-CorePlatform-0003](/cross-boundary/ADR-CorePlatform-0003.md).
 3. Monitor GitHub's roadmap for non-GitHub access to Copilot Spaces; revisit the AI-query-access limitation if the platform capability changes.
 
