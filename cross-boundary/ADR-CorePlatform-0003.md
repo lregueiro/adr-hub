@@ -134,7 +134,7 @@ Variables (non-sensitive):
 
 ## Next Steps
 
-1. Build the GitHub Actions workflow and sync script skeleton, running in dry-run mode (all stages execute, no Confluence writes).
+1. Build the GitHub Actions.... workflow and sync script skeleton, running in dry-run mode (all stages execute, no Confluence writes).
 2. Manually create Confluence pages for ADR-0001 and ADR-0002 in DSP, populate their \`confluence_page_id\`, and merge to trigger the first live sync.
 3. Validate comment preservation: add a test comment in Confluence, make a minor edit to one section of one ADR, merge, and confirm only that section updates and the comment survives.
 4. Validate index synthesis produces a usable parent page.
